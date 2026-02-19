@@ -1,0 +1,21 @@
+{
+  "name": "claude-monitor",
+  "version": "1.0.0",
+  "description": "Terminal-based real-time monitoring dashboard for Claude Code",
+  "main": "src/index.js",
+  "bin": {
+    "claude-monitor": "./bin/claude-monitor.js"
+  },
+  "scripts": {
+    "start": "node bin/claude-monitor.js"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "blessed-contrib": "^4.11.0",
+    "chokidar": "^4.0.3"
+  }
+}
