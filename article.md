@@ -127,15 +127,9 @@ screen.on('resize', () => {
 
 **出力結果**: `t` キーでTODO状態を3段階遷移。 `~/.claude-monitor-todos.json` に永続化。
 
-```mermaid
-stateDiagram-v2
-    [*] --> 未登録
-    未登録 --> pending: t キー押下
-    pending --> completed: t キー押下
-    completed --> [*]: t キー押下（削除）
-
-    note right of pending: □ マーク表示
-    note right of completed: ✓ マーク表示
+```
+  t キー        t キー        t キー
+未登録 ──→ pending (□) ──→ completed (✓) ──→ 削除(未登録に戻る)
 ```
 
 ---
@@ -185,14 +179,23 @@ stateDiagram-v2
   UserControllerのAPI仕様書..
 ```
 
-```mermaid
-flowchart LR
-    A[subagents/ 走査] --> B[agent-*.jsonl 検出]
-    B --> C{mtime 5分以内？}
-    C -->|Yes| D[先頭4KB読み取り]
-    D --> E[最初のJSON行パース]
-    E --> F[message.content → タスク内容]
-    C -->|No| G[スキップ]
+```
+subagents/ 走査
+    │
+    ▼
+agent-*.jsonl 検出
+    │
+    ▼
+mtime 5分以内？ ──No──→ スキップ
+    │Yes
+    ▼
+先頭4KB読み取り
+    │
+    ▼
+最初のJSON行パース
+    │
+    ▼
+message.content → タスク内容
 ```
 
 ---
@@ -211,65 +214,40 @@ flowchart LR
 
 ## アーキテクチャ
 
-```mermaid
-graph TB
-    subgraph "~/.claude/ (ファイルシステム)"
-        S[sessions-index.json]
-        J[セッション.jsonl]
-        A[subagents/agent-*.jsonl]
-        C[stats-cache.json]
-    end
-
-    subgraph Collectors
-        SC[session-collector<br/>3秒間隔]
-        UC[usage-collector<br/>3秒間隔]
-        STC[stats-collector<br/>5秒間隔]
-    end
-
-    subgraph Store
-        ST[EventEmitter<br/>change:key イベント]
-    end
-
-    subgraph "UI Widgets (blessed)"
-        H[ヘッダー]
-        WH[作業履歴]
-        TB[トークン効率]
-        AP[サブエージェント]
-        TC[トークン推移]
-        TP[TODO]
-        AS[日別消費量]
-    end
-
-    S --> SC
-    A --> SC
-    J --> UC
-    C --> STC
-    SC --> ST
-    UC --> ST
-    STC --> ST
-    ST --> H
-    ST --> WH
-    ST --> TB
-    ST --> AP
-    ST --> TC
-    ST --> TP
-    ST --> AS
+```
+┌─────────────────────────────┐
+│  ~/.claude/ (ファイルシステム)  │
+│                             │
+│  sessions-index.json ───────┼──→ session-collector (3秒)──┐
+│  subagents/agent-*.jsonl ───┤                             │
+│  セッション.jsonl ──────────┼──→ usage-collector (3秒) ───┤
+│  stats-cache.json ──────────┼──→ stats-collector (5秒) ───┤
+└─────────────────────────────┘                             │
+                                                            ▼
+                                              ┌──────────────────┐
+                                              │      Store       │
+                                              │  (EventEmitter)  │
+                                              │ change:key イベント│
+                                              └────────┬─────────┘
+                                                       │
+                          ┌──────┬──────┬──────┬───────┼───────┬──────┐
+                          ▼      ▼      ▼      ▼       ▼       ▼      ▼
+                       ヘッダー 作業履歴 トークン サブ   トークン  TODO  日別
+                                      効率   エージェント 推移        消費量
 ```
 
-```mermaid
-sequenceDiagram
-    participant FS as ~/.claude/
-    participant C as Collector
-    participant S as Store
-    participant W as Widget
-
-    loop 3秒ごと
-        C->>FS: ファイル読み取り
-        FS-->>C: JSON/JSONL データ
-        C->>S: store.update(key, data)
-        S->>W: emit('change:key')
-        W->>W: 再描画
-    end
+```
+  ┌──────────┐     ┌───────────┐     ┌─────────┐     ┌──────────┐
+  │~/.claude/│     │ Collector │     │  Store   │     │  Widget  │
+  └────┬─────┘     └─────┬─────┘     └────┬────┘     └────┬─────┘
+       │                 │                │               │
+       │  ◄──読み取り──  │                │               │
+       │──データ返却──►  │                │               │
+       │                 │──update()──►   │               │
+       │                 │                │──emit()──►    │
+       │                 │                │               │──再描画
+       │                 │                │               │
+       :    (3秒後に繰り返し)              :               :
 ```
 
 ---
