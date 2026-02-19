@@ -1,133 +1,131 @@
-# Claude Code の稼働状況をリアルタイムで把握する監視ダッシュボードを作った話
-
-## はじめに
-
-Claude Code を業務で本格的に使い始めると、こんな疑問が湧いてきます。
-
-- 「今日トークンどれくらい使った？」
-- 「サブエージェントが何やってるか分からない」
-- 「さっき何の作業してたっけ？次やることは？」
-
-これらを**ターミナル1画面でリアルタイムに把握**できるTUIダッシュボード「**Claude Monitor**」を作りました。
+# Claude Code の監視ダッシュボードを対話だけで作った話
 
 > リポジトリ: [github.com/SimWook/claude-monitor](https://github.com/SimWook/claude-monitor)
 
-## 動作イメージ
+---
 
-<!-- ここにスクリーンショットを貼り付け -->
+## 1. ダッシュボード全体設計
 
-## なぜ作ったのか
+Claude Code の稼働状況をターミナル1画面で把握したい。レイアウト案とウィジェット仕様を渡して、一括で実装させた。
 
-Claude Code はファイルシステムベースで動作しており、`~/.claude/` 配下にセッション情報、トークン消費量、タスク状態などが蓄積されます。しかし、これらの情報を確認するには個別にファイルを開く必要があり、**開発フロー中にリアルタイムで状況把握するのが困難**でした。
+> **プロンプト（要約）**
+> 以下のプランを実装してくれ:
+> - 作業履歴 (6行, Branch/Summary/Age)
+> - トークン効率ゲージ (Cache Hit% / Output% / Today/Avg)
+> - サブエージェント監視パネル
+> - トークン推移チャート、日別消費バーチャート
+> - レイアウト: 12x12 grid で配置
 
-特にサブエージェント（Task tool）を複数起動している場合、各エージェントが何を担当しているかを把握する手段がありませんでした。
+**出力結果**: 7ウィジェット + コレクター群 + Store を一括生成。27ファイル、約2,500行。
 
-## 機能概要
-
-```mermaid
-graph TB
-    subgraph Claude Code
-        S[セッションJSONL]
-        A[サブエージェントJSONL]
-        C[stats-cache.json]
-        T[タスクディレクトリ]
-    end
-
-    subgraph Claude Monitor
-        COL[Collectors<br/>ポーリング収集]
-        STORE[Store<br/>EventEmitter状態管理]
-        UI[TUI Dashboard<br/>blessed + blessed-contrib]
-    end
-
-    S -->|3秒間隔| COL
-    A -->|タスク内容抽出| COL
-    C --> COL
-    T --> COL
-    COL --> STORE
-    STORE -->|change イベント| UI
+```
+claude-monitor/
+├── bin/claude-monitor.js          # CLI (on/off/toggle/status)
+├── src/
+│   ├── store.js                   # EventEmitter 状態管理
+│   ├── collectors/                # ファイルシステムからデータ収集
+│   │   ├── session-collector.js
+│   │   ├── usage-collector.js
+│   │   └── ...
+│   └── ui/widgets/                # 各ウィジェット
+│       ├── work-history.js
+│       ├── token-budget.js
+│       ├── agent-panel.js
+│       └── ...
+└── package.json
 ```
 
-### 7つのウィジェット
+<!-- ここに初回ダッシュボードのスクリーンショット -->
 
-| ウィジェット | 何が分かるか |
+---
+
+## 2. 「このグラフ意味わからない」→ バーチャートに変更
+
+sparkline で7日間トークンを表示したが、数値もラベルもなく何のグラフか不明だった。
+
+> **プロンプト**
+> Daily Tokens (7d) -- Today: 72M このグラフの意味はよくわからないと思うのでもっといい感じにしてくれ
+
+**出力結果**: sparkline を `contrib.bar` に置換。日付ラベル (`19(水)` 形式) + 百万単位の消費量を表示するバーチャートに変更。
+
+<!-- ここに変更後のスクリーンショット -->
+
+---
+
+## 3. 全ラベルの日本語化
+
+ウィジェットのラベルが英語で、何を表示しているか直感的に分からなかった。
+
+> **プロンプト**
+> Weekly Activityで何を表示しているのかわからないため。説明とか明確に書いてくれ。他のところも一緒。システム設定が日本語なら日本語で英語なら英語にしてくれ。
+
+**出力結果**: 全ウィジェットのラベルを日本語化。
+
+| Before | After |
 |---|---|
-| **ヘッダー** | 使用モデル、稼働セッション数、累計費用、エージェント数 |
-| **作業履歴** | 全セッションの一覧。Branch、Summary、メッセージ数、経過時間 |
-| **トークン効率** | Cache Hit率、Output比率、本日vs平均ペースの3ゲージ |
-| **サブエージェント** | 稼働中エージェントのID、プロジェクト、**担当タスク内容**、経過時間 |
-| **TODO** | 作業履歴から `t` キーで登録したTODOリスト。セッション間で永続化 |
-| **トークン推移** | 7日間のキャッシュ vs I/O トークンのトレンドチャート |
-| **日別消費量** | 7日間のトークン消費量をバーチャートで可視化 |
+| Weekly Activity | 日別トークン消費量 (百万) |
+| Token Budget | トークン効率 (週間) |
+| Work History | 作業履歴 (*=稼働 ~=1h以内) |
+| Sub-Agents | サブエージェント |
 
-## 技術的なポイント
+---
 
-### 1. ファイルシステムからの情報抽出
+## 4. ヘッダー情報の精度修正
 
-Claude Code は `~/.claude/projects/` 配下にプロジェクトごとのディレクトリを持ち、各セッションはJSONL形式で記録されています。
+モデル名が過去の累計ベースで `opus 4.5` と表示され、稼働中セッションも 0 のままだった。
 
-```
-~/.claude/
-├── projects/
-│   └── -Users-xxx-workspace/
-│       ├── sessions-index.json       # セッション一覧
-│       ├── {sessionId}.jsonl         # セッション会話ログ
-│       └── {sessionId}/
-│           └── subagents/
-│               └── agent-{id}.jsonl  # サブエージェント会話ログ
-└── stats-cache.json                  # 費用統計
-```
+> **プロンプト**
+> CLAUDE MONITOR | モデル: opus 4.5 | 稼働中: 0 | 費用: $106.26 これも修正してくれ
 
-サブエージェントの担当タスクは、エージェントJSONLファイルの**最初の行**（初回ユーザーメッセージ）から抽出しています。ファイル先頭の4KBだけ読み取るため、大きなファイルでも負荷は最小限です。
+**出力結果**: JSONL ファイルの `message.model` フィールドから現在のモデル名を取得。ファイルの mtime で稼働中セッションを判定するように変更。
 
 ```javascript
-// エージェントJSONLの最初の行からタスク内容を取得
-function extractAgentTask(filePath) {
-  const fd = openSync(filePath, 'r');
-  const buf = Buffer.alloc(4096);
-  const bytesRead = readSync(fd, buf, 0, 4096, 0);
-  closeSync(fd);
-  const line = buf.toString('utf8', 0, bytesRead).split('\n')[0];
-  const obj = JSON.parse(line);
-  return obj.message?.content?.slice(0, 200) || '';
+// 最新のJSONLファイルからモデル名を抽出
+const lines = content.trim().split('\n');
+for (let i = lines.length - 1; i >= 0; i--) {
+  const obj = JSON.parse(lines[i]);
+  if (obj.message?.model) {
+    return formatModelName(obj.message.model); // → "opus 4.6"
+  }
 }
 ```
 
-### 2. EventEmitter ベースのリアクティブ更新
+---
 
-Store は Node.js の EventEmitter を継承しており、データ変更時に `change:{key}` イベントを発火します。各ウィジェットはこのイベントを購読して自律的に再描画します。
+## 5. ターミナルリサイズ対応
 
-```mermaid
-sequenceDiagram
-    participant C as Collector
-    participant S as Store
-    participant W as Widget
+ウィンドウを広げるとウィジェットが崩れる問題。
 
-    loop 3秒ごと
-        C->>C: ファイルシステム読み取り
-        C->>S: store.update('sessions', data)
-        S->>W: emit('change:sessions')
-        W->>W: 再描画
-    end
+> **プロンプト**
+> 稼働中の場合、ターミナルを大きくすると表示とか中のものが崩れるのでターミナルサイズに従うデザインに変更してくれ
+
+**出力結果**: デバウンス付きリサイズハンドラーを追加。`screen.realloc()` で再計算後、全ウィジェットに再描画イベントを発火。
+
+```javascript
+screen.on('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    screen.realloc();
+    for (const key of Object.keys(store.state)) {
+      store.emit(`change:${key}`, store.state[key]);
+    }
+    screen.render();
+  }, 150);
+});
 ```
 
-### 3. サブエージェント検出の仕組み
+> **注意点**: Canvas系ウィジェット (line/bar) は `setData()` を再呼び出ししないとサイズが追従しない。`change` イベントの再発火で各ウィジェットの `update()` が走り、内部的に `calcSize()` される。
 
-```mermaid
-flowchart LR
-    A[projects ディレクトリ走査] --> B[session ごとに<br/>subagents/ を確認]
-    B --> C{agent-*.jsonl<br/>が存在？}
-    C -->|Yes| D[mtime 確認]
-    D --> E{5分以内に<br/>更新あり？}
-    E -->|Yes| F[稼働中として登録<br/>+ タスク内容抽出]
-    E -->|No| G[スキップ]
-    C -->|No| G
-```
+---
 
-ファイルの更新時刻（mtime）が5分以内のエージェントを「稼働中」と判定します。これにより、完了したエージェントは自動的にリストから消えます。
+## 6. TODO 機能の追加
 
-### 4. TODO のライフサイクル
+セッション横断で「次にやること」を管理したかった。
 
-作業履歴テーブルで `t` キーを押すとTODO状態が遷移します。
+> **プロンプト**
+> 作業履歴でTODOマークつけると次にclaudeコードを開いた時にアラートとかTODOリストで次にやる作業ですといつ登録したか内容も追記して。完了したら完了でTODOに見えないような感じもできる？
+
+**出力結果**: `t` キーでTODO状態を3段階遷移。 `~/.claude-monitor-todos.json` に永続化。
 
 ```mermaid
 stateDiagram-v2
@@ -140,42 +138,141 @@ stateDiagram-v2
     note right of completed: ✓ マーク表示
 ```
 
-TODOデータは `~/.claude-monitor-todos.json` に永続化されるため、ダッシュボードを再起動しても保持されます。
+---
 
-## セットアップ
+## 7. TODO選択のバグ修正
 
-```bash
-# クローン & インストール
-git clone https://github.com/SimWook/claude-monitor.git
-cd claude-monitor
-npm install
+`t` を押すと選択行の1つ上の行がTODO登録されるバグ。
 
-# 起動
-node bin/claude-monitor.js on
+> **プロンプト**
+> バグがあるけど。tを押すと上のところがチェックしちゃう。それとセッションが保存されない。
 
-# 停止
-node bin/claude-monitor.js off
+**出力結果**: `contrib.table` の `rows.selected` はヘッダーを含まない（0 = 最初のデータ行）。`selected - 1` としていたオフバイワンエラーを修正。
+
+> **注意点**: blessed-contrib の table は内部的に `blessed.list` を使っており、ヘッダーは別要素。ドキュメントに明記されておらず、実際に検証して判明した。
+
+---
+
+## 8. 操作ログ → TODO パネルに置換
+
+操作ログパネルの有用性が低く、TODOの方が実用的だった。
+
+> **プロンプト**
+> 操作ログの方を消してTODOとか次にやる作業のリストを書いたら良いかと。それとサブエージェント起動状況把握コードが消されたぽいだけど復活してくれ。
+
+**出力結果**: event-log.js を todo-panel.js に置換。pendingは黄色□マーク、completedは灰色✓マーク、登録日時付き。サブエージェント検出コードも復元。
+
+<!-- ここにTODOパネルのスクリーンショット -->
+
+---
+
+## 9. サブエージェントの担当タスク表示
+
+エージェントIDだけでは何をしているか分からない。
+
+> **プロンプト**
+> サブエージェント使う時になんの担当をしているかを確認できる？
+
+**出力結果**: エージェントのJSONLファイルの最初の行（初回ユーザーメッセージ）からタスク内容を抽出して表示。4KBだけ読み取るため負荷は最小限。
+
+```
+ サブエージェント (3稼働中)
+ a8c3e2  5s  workspace
+  claude-monitorダッシュボー..
+ 24981b 12s  Mikasa-Srv
+  認証フローのE2Eテスト実装..
+ 31df17 25s  Mikasa-Srv
+  UserControllerのAPI仕様書..
 ```
 
-### Claude Code フックで自動起動
-
-`~/.claude/hooks.json` に以下を追加すると、Claude Code 起動時にダッシュボードが自動で開きます。
-
-```json
-{
-  "hooks": [
-    {
-      "matcher": "SessionStart",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "node /path/to/claude-monitor/bin/claude-monitor.js on 2>/dev/null || true"
-        }
-      ]
-    }
-  ]
-}
+```mermaid
+flowchart LR
+    A[subagents/ 走査] --> B[agent-*.jsonl 検出]
+    B --> C{mtime 5分以内？}
+    C -->|Yes| D[先頭4KB読み取り]
+    D --> E[最初のJSON行パース]
+    E --> F[message.content → タスク内容]
+    C -->|No| G[スキップ]
 ```
+
+---
+
+## 10. リポジトリ公開・リリース
+
+> **プロンプト**
+> レポジトリを作ってコミットプッシュして。READMEも作成して。publicでよい。
+
+**出力結果**: GitHub リポジトリ作成、README生成、`v0.1.0-beta` としてリリース。
+
+- リポジトリ: [github.com/SimWook/claude-monitor](https://github.com/SimWook/claude-monitor)
+- リリース: [v0.1.0-beta](https://github.com/SimWook/claude-monitor/releases/tag/v0.1.0-beta)
+
+---
+
+## アーキテクチャ
+
+```mermaid
+graph TB
+    subgraph "~/.claude/ (ファイルシステム)"
+        S[sessions-index.json]
+        J[セッション.jsonl]
+        A[subagents/agent-*.jsonl]
+        C[stats-cache.json]
+    end
+
+    subgraph Collectors
+        SC[session-collector<br/>3秒間隔]
+        UC[usage-collector<br/>3秒間隔]
+        STC[stats-collector<br/>5秒間隔]
+    end
+
+    subgraph Store
+        ST[EventEmitter<br/>change:key イベント]
+    end
+
+    subgraph "UI Widgets (blessed)"
+        H[ヘッダー]
+        WH[作業履歴]
+        TB[トークン効率]
+        AP[サブエージェント]
+        TC[トークン推移]
+        TP[TODO]
+        AS[日別消費量]
+    end
+
+    S --> SC
+    A --> SC
+    J --> UC
+    C --> STC
+    SC --> ST
+    UC --> ST
+    STC --> ST
+    ST --> H
+    ST --> WH
+    ST --> TB
+    ST --> AP
+    ST --> TC
+    ST --> TP
+    ST --> AS
+```
+
+```mermaid
+sequenceDiagram
+    participant FS as ~/.claude/
+    participant C as Collector
+    participant S as Store
+    participant W as Widget
+
+    loop 3秒ごと
+        C->>FS: ファイル読み取り
+        FS-->>C: JSON/JSONL データ
+        C->>S: store.update(key, data)
+        S->>W: emit('change:key')
+        W->>W: 再描画
+    end
+```
+
+---
 
 ## ダッシュボードレイアウト
 
@@ -202,37 +299,50 @@ node bin/claude-monitor.js off
 └───────────────────────────────────────────────┘
 ```
 
-<!-- ここに実際のスクリーンショットを貼り付け -->
-
-## 使用技術
-
-| 技術 | 用途 |
-|---|---|
-| **Node.js** | ランタイム |
-| **blessed / blessed-contrib** | ターミナルTUIフレームワーク |
-| **EventEmitter** | リアクティブ状態管理 |
-| **JSONL パース** | Claude Code セッションデータ読み取り |
-| **ファイル mtime 監視** | エージェント稼働状態の判定 |
-
-## 開発の経緯
-
-このツールは Claude Code 自身を使って開発しました。初期のレイアウト設計からウィジェット実装、バグ修正、機能追加まで、すべて Claude Code との対話の中で段階的に構築しています。
-
-開発中に得た知見:
-
-1. **blessed-contrib の contrib.gaugeList は `stack` 配列が必須** — ドキュメントに記載がなく、ソースコードを読んで初めて分かった
-2. **contrib.table の `rows.selected` は0始まり** — ヘッダー行は含まれない。オフバイワンエラーに注意
-3. **Canvas系ウィジェット（line/bar）はリサイズ時に `calcSize()` が必要** — データを再セットすることで内部的に再計算される
-4. **Ghostty ターミナルの `-e` フラグ** — 環境変数の設定は直接渡せないため、シェルラッパーが必要
-
-## まとめ
-
-Claude Code の可観測性を高めることで、AIエージェントとの協業がより効率的になります。特にサブエージェントの担当タスクが一目で分かることで、**何が並行で動いているかを把握しながら作業を進められる**ようになりました。
-
-TODO機能により、Claude Code のセッション横断で「次にやること」を管理できるのも、日常のワークフローに組み込みやすいポイントです。
+<!-- ここに実際のスクリーンショット -->
 
 ---
 
+## セットアップ
+
+```bash
+git clone https://github.com/SimWook/claude-monitor.git
+cd claude-monitor
+npm install
+node bin/claude-monitor.js on
+```
+
+### Claude Code フックで自動起動
+
+`~/.claude/hooks.json` に追加すると、Claude Code 起動のたびにダッシュボードが自動で立ち上がる。
+
+```json
+{
+  "hooks": [
+    {
+      "matcher": "SessionStart",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "node /path/to/claude-monitor/bin/claude-monitor.js on 2>/dev/null || true"
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+## まとめ
+
+| 項目 | 内容 |
+|---|---|
+| 開発時間 | 約2時間（Claude Code との対話のみ） |
+| 総コード量 | 約2,500行 / 27ファイル |
+| プロンプト回数 | 約15回（設計1回 + 修正・機能追加14回） |
+| 使用技術 | Node.js, blessed, blessed-contrib, EventEmitter |
+
+Claude Code に対して「作って」「直して」「変えて」を繰り返すだけで、実用的な監視ツールが完成しました。特に**フィードバックループの速さ**がポイントで、「このグラフ意味わからない」→ 即修正 → 確認のサイクルを高速に回せました。
+
 > リポジトリ: [github.com/SimWook/claude-monitor](https://github.com/SimWook/claude-monitor)
->
-> ライセンス: MIT
